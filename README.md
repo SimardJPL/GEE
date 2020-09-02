@@ -6,7 +6,11 @@ Simply copy and paste the following into the script window (center of Google Ear
 The GEE "Imports" lines, which include defining the FeatureCollection, must be generated within GEE manually using the "Geometry Imports" menu at the bottom of the GEE inteface.
 The "basins" GEE Table is the "regions_inclusive" asset found in the directory "Assets" and should therefore be uploaded. Otherwise, you can upload your own shapefile into GEE.
 The "Imports" as used in tutorial video is shown in file README_Imports.md.
-// This code produces a land cover classification base on either a shapefile or a collection of mygee from GEE.
+
+Next is the script that corresponds to "Classif_l8_S1_S2_Alos".  Further below is the script for "DataAnalysis".
+
+// Classif_l8_S1_S2_Alos
+//This code produces a land cover classification base on either a shapefile or a collection of mygee from GEE.
 // The shapefile is created with a GIS and must contain an attribute called "class_id" which is a number starting at 0 (zero).
 // The GEE collection are mygee collected with the "Add Marker" and "Geometry imports" button on the GEE image diplay.
 
@@ -176,4 +180,217 @@ Export.image.toDrive({
   fileFormat: 'GeoTIFF',
   scale: 30
 });
+
+
+// This is the script for DataAnalysis
+
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var landsat8 = ee.ImageCollection("LANDSAT/LC08/C01/T1_SR"),
+    sentinel2 = ee.ImageCollection("COPERNICUS/S2"),
+    Guyana = ee.FeatureCollection("users/echoparkrs/region2_inclusive");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+//center map
+Map.setCenter(-58.6, 7.5);
+Map.setZoom(10)
+Map.centerObject(Guyana,7)
+Map.setOptions('satellite')
+
+var l8_res = 30;
+var S2_out_res = 10;
+
+print(Guyana,'Guyana Region 2')
+Map.addLayer(Guyana,{},'Regions 2')
+
+////////////////////
+//Landsat 8///////
+///////////////////
+
+//filter collection
+var landsatguyana = landsat8.filterDate('2017-07-15', '2019-10-30')
+                           .filterBounds(Guyana)
+                           .filter(ee.Filter.calendarRange(7,10,'month'))
+
+                           
+print(landsatguyana,'landsatguyana')
+
+
+///Function definitions
+function addNDVI(img) {
+  img = ee.Image(img)
+  var ndvi = img.normalizedDifference(['B5', 'B4']).rename(['ndvi'])
+  var img_ndvi = img.addBands(ndvi)
+  return img_ndvi
+}
+
+//add ndwi
+function addNDWI(img) {
+  img = ee.Image(img)
+  var ndwi = img.normalizedDifference(['B3', 'B5']).rename(['ndwi'])
+  var img_ndwi = img.addBands(ndwi)
+  return img_ndwi
+}
+
+
+//cloudmask
+function cloudMask(img){
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  var cloudShadowBitMask = (1 << 3)
+  var cloudsBitMask = (1 << 5)
+  // Get the pixel QA band.
+  var qa = img.select('pixel_qa')
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+                 .and(qa.bitwiseAnd(cloudsBitMask).eq(0))
+  return img.updateMask(mask)
+}
+
+
+// this will compute ndvi forom the landsatguyana imagecollection
+var l8guyana_ndvi = landsatguyana.map(addNDVI).map(cloudMask)
+var l8guyana_ndwi = landsatguyana.map(addNDWI).map(cloudMask)
+
+
+var imageVisParams_l8 = {"opacity":1,"min":-0.3,"max":1, "gamma":1};
+
+//clip image collection to Guyana geometry\
+var l8guyana_ndvi_final = l8guyana_ndvi.map(function(image) { return image.clip(Guyana); });
+var l8guyana_ndwi_final = l8guyana_ndwi.map(function(image) { return image.clip(Guyana); });
+
+//Map.addLayer(l8guyana_final.mean(),imageVisParams_l8,'L8 NDVI 2019')
+
+//trying index and improve filtering
+var l8_NDVI = l8guyana_ndvi_final.select(['ndvi']);
+var l8_NDVI = l8_NDVI.median();
+var l8_NDWI = l8guyana_ndwi_final.select(['ndvi']);
+var l8_NDWI = l8_NDWI.median();
+
+Map.addLayer(l8_NDVI,imageVisParams_l8,'L8 NDVI 2019')
+
+////////////////////////////\
+// Sentinel 2//////////////\
+///////////////////////////\
+
+//filter S2 imagery
+var sentinelguyana = sentinel2.filterDate('2019-08-01', '2019-09-15')
+                           .filterBounds(Guyana)
+                           
+print(sentinelguyana,'sentinelguyana')
+
+//cloudmask
+var maskcloud1 = function(image) {
+var QA60 = image.select(['QA60']);
+return image.updateMask(QA60.lt(1));
+};
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return image.updateMask(mask).divide(10000);
+}
+
+
+// Function to calculate and add an NDVI band
+var addNDVI = function(image) {
+return image.addBands(image.normalizedDifference(['B8', 'B4']));
+};
+
+// Function to calculate and add an NDWI band
+var addNDWI = function(image) {
+return image.addBands(image.normalizedDifference(['B3', 'B5']).rename('ndwi'));
+};
+
+// Compute the EVI using an expression. return EVI.
+var addEVI = function(image) {
+return image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+      'NIR': image.select(['B8']),
+      'RED': image.select(['B4']),
+      'BLUE': image.select(['B2'])
+})};
+
+// Add NDVI band to image collection
+
+var sentinelguyana = sentinelguyana
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+                  .map(maskS2clouds);
+                  
+var S2 = sentinelguyana.map(addNDVI).map(maskcloud1);
+//var NDVI = sentinel2.map(addNDVI);
+var S2 = S2.map(function(image) { return image.clip(Guyana); });
+// Extract NDVI band and create NDVI median composite image
+var NDVI = S2.select(['nd']);  //nd
+var NDVI = NDVI.median();
+
+var S2 = S2.map(addNDWI);
+//var NDWI = NDWI.map(function(image) { return image.clip(guyana); });
+var NDWI = S2.select(['ndwi']);
+var NDWI = NDWI.median();
+
+var S2EVI = sentinelguyana.map(addEVI);
+//var EVI = S2EVI.select(['ev']);
+var EVI = S2EVI.median();
+var EVI = EVI.clip(Guyana);
+
+
+var S2_NIR = sentinelguyana.select(['B8']);
+var S2_NIR = S2_NIR.median();
+var S2_NIR = S2_NIR.clip(Guyana);
+
+
+// Create palettes for display of NDVI\
+//var ndvi_visParams_s2 = {"opacity":1,"bands":['nd'],"min":0.03227182477712631,"max":0.12915651500225067, palette:['blue','white','green']};
+var ndvi_visParams_s2 = {min: -1, max: 1};
+
+
+// Display NDVI results on map
+Map.addLayer(NDVI,ndvi_visParams_s2, 'S2 NDVI 2019');
+
+
+//Exportig data to google Drive///
+var geometry = ee.Geometry(Guyana)
+Export.image.toDrive({
+  image: NDVI,
+  description: 'S2_NDVI_Aug2019',
+  region: Guyana,
+  fileFormat: 'GeoTIFF',
+  scale: S2_out_res,
+  maxPixels: 110315250
+});
+
+Export.image.toDrive({
+  image: NDWI,
+  description: 'S2_NDWI_Aug2019',
+  region: Guyana,
+  fileFormat: 'GeoTIFF',
+  scale: S2_out_res,
+  maxPixels: 110315240
+});
+
+Export.image.toDrive({
+  image: EVI,
+  description: 'S2_EVI_Aug2019',
+  region: Guyana,
+  fileFormat: 'GeoTIFF',
+  scale: S2_out_res,
+  maxPixels: 110315240
+});
+
+Export.image.toDrive({
+  image: S2_NIR,
+  description: 'S2_NIR_Aug2019',
+  region: Guyana,
+  fileFormat: 'GeoTIFF',
+  scale: S2_out_res,
+  maxPixels: 110315240
+});
+
+
 
